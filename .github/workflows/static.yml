@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <title>Track Navigator</title>
+  <style>
+    * {
+      box-sizing: border-box;
+      user-select: none;
+      -webkit-user-select: none;
+      -webkit-touch-callout: none;
+    }
+    body, html {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: #0f172a;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      touch-action: none;
+    }
+    #game-container {
+      position: relative;
+      width: 100%;
+      height: 100%;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    .ui-overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      padding: 20px;
+      pointer-events: none;
+      display: flex;
+      justify-content: space-between;
+      color: #f8fafc;
+      font-weight: 600;
+      font-size: 1.1rem;
+    }
+    .modal {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background: rgba(15, 23, 42, 0.85);
+      backdrop-filter: blur(8px);
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      color: #f8fafc;
+      z-index: 10;
+    }
+    .modal h1 {
+      margin: 0 0 10px 0;
+      font-size: 2rem;
+    }
+    .modal p {
+      margin: 0 0 20px 0;
+      color: #94a3b8;
+      text-align: center;
+      padding: 0 20px;
+    }
+    .btn {
+      padding: 12px 28px;
+      background: #38bdf8;
+      color: #0f172a;
+      border: none;
+      border-radius: 9999px;
+      font-weight: bold;
+      font-size: 1rem;
+      cursor: pointer;
+      pointer-events: auto;
+      box-shadow: 0 4px 14px rgba(56, 189, 248, 0.4);
+    }
+    .btn:active {
+      transform: scale(0.96);
+    }
+  </style>
+</head>
+<body>
+
+  <div id="game-container">
+    <div class="ui-overlay">
+      <div id="timer">Time: 0.0s</div>
+      <div id="status">Guide ball to GOAL</div>
+    </div>
+
+    <div id="start-modal" class="modal">
+      <h1>Track Navigator</h1>
+      <p>Drag the neon ball along the path from START to FINISH without sliding off-track.</p>
+      <button class="btn" id="start-btn">Start Game</button>
+    </div>
+
+    <div id="win-modal" class="modal" style="display: none;">
+      <h1>Course Complete!</h1>
+      <p id="final-time">Your time: 0.0s</p>
+      <button class="btn" id="restart-btn">Play Again</button>
+    </div>
+
+    <canvas id="canvas"></canvas>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+    const timerEl = document.getElementById('timer');
+    const startModal = document.getElementById('start-modal');
+    const winModal = document.getElementById('win-modal');
+    const finalTimeEl = document.getElementById('final-time');
+
+    // Audio Controller (Web Audio API)
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    let audioCtx;
+
+    function playTone(freq, type = 'sine', duration = 0.1) {
+      if (!audioCtx) return;
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.type = type;
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.start();
+      osc.stop(audioCtx.currentTime + duration);
+    }
+
+    // State Variables
+    let width, height;
+    let isPlaying = false;
+    let isDragging = false;
+    let startTime = 0;
+    let elapsedTime = 0;
+    let timerInterval = null;
+
+    // Track Configuration
+    const pathWidth = 50;
+    const ballRadius = 16;
+    let pathPoints = [];
+    let startPoint = { x: 0, y: 0 };
+    let endPoint = { x: 0, y: 0 };
+    let ball = { x: 0, y: 0 };
+
+    function resizeCanvas() {
+      width = window.innerWidth;
+      height = window.innerHeight;
+      canvas.width = width;
+      canvas.height = height;
+      generateTrackPoints();
+      resetBall();
+    }
+
+    function generateTrackPoints() {
+      // Dynamic S-curve track generation adjusted for current screen dimensions
+      pathPoints = [
+        { x: width * 0.15, y: height * 0.2 },
+        { x: width * 0.85, y: height * 0.2 },
+        { x: width * 0.85, y: height * 0.5 },
+        { x: width * 0.15, y: height * 0.5 },
+        { x: width * 0.15, y: height * 0.8 },
+        { x: width * 0.85, y: height * 0.8 }
+      ];
+
+      startPoint = pathPoints[0];
+      endPoint = pathPoints[pathPoints.length - 1];
+    }
+
+    function resetBall() {
+      ball.x = startPoint.x;
+      ball.y = startPoint.y;
+    }
+
+    // Collision Detection: Calculates distance to nearest track line segment
+    function isOnTrack(px, py) {
+      for (let i = 0; i < pathPoints.length - 1; i++) {
+        const p1 = pathPoints[i];
+        const p2 = pathPoints[i + 1];
+        const dist = distToSegment({ x: px, y: py }, p1, p2);
+        if (dist <= pathWidth / 2) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    function distToSegment(p, v, w) {
+      const l2 = (v.x - w.x) ** 2 + (v.y - w.y) ** 2;
+      if (l2 === 0) return Math.hypot(p.x - v.x, p.y - v.y);
+      let t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
+      t = Math.max(0, Math.min(1, t));
+      return Math.hypot(p.x - (v.x + t * (w.x - v.x)), p.y - (v.y + t * (w.y - v.y)));
+    }
+
+    function drawTrack() {
+      // Background Outer Border
+      ctx.beginPath();
+      ctx.strokeStyle = '#334155';
+      ctx.lineWidth = pathWidth + 8;
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.moveTo(pathPoints[0].x, pathPoints[0].y);
+      for (let i = 1; i < pathPoints.length; i++) {
+        ctx.lineTo(pathPoints[i].x, pathPoints[i].y);
+      }
+      ctx.stroke();
+
+      // Main Track Line
+      ctx.beginPath();
+      ctx.strokeStyle = '#1e293b';
+      ctx.lineWidth = pathWidth;
+      ctx.moveTo(pathPoints[0].x, pathPoints[0].y);
+      for (let i = 1; i < pathPoints.length; i++) {
+        ctx.lineTo(pathPoints[i].x, pathPoints[i].y);
+      }
+      ctx.stroke();
+
+      // Start Area
+      ctx.beginPath();
+      ctx.fillStyle = '#22c55e';
+      ctx.arc(startPoint.x, startPoint.y, pathWidth / 2, 0, Math.PI * 2);
+      ctx.fill();
+
+      // End Area
+      ctx.beginPath();
+      ctx.fillStyle = '#ef4444';
+      ctx.arc(endPoint.x, endPoint.y, pathWidth / 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function drawBall() {
+      ctx.beginPath();
+      ctx.arc(ball.x, ball.y, ballRadius, 0, Math.PI * 2);
+      ctx.fillStyle = '#38bdf8';
+      ctx.shadowColor = '#38bdf8';
+      ctx.shadowBlur = 12;
+      ctx.fill();
+      ctx.shadowBlur = 0; // Reset shadow
+    }
+
+    function render() {
+      ctx.clearRect(0, 0, width, height);
+      drawTrack();
+      drawBall();
+      requestAnimationFrame(render);
+    }
+
+    // Touch / Pointer Event Handling
+    function handlePointerDown(e) {
+      if (!isPlaying) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+
+      const distToBall = Math.hypot(x - ball.x, y - ball.y);
+      if (distToBall <= ballRadius * 2) {
+        isDragging = true;
+      }
+    }
+
+    function handlePointerMove(e) {
+      if (!isDragging || !isPlaying) return;
+
+      const rect = canvas.getBoundingClientRect();
+      const nextX = e.clientX - rect.left;
+      const nextY = e.clientY - rect.top;
+
+      // Off-track check
+      if (isOnTrack(nextX, nextY)) {
+        ball.x = nextX;
+        ball.y = nextY;
+
+        // Goal reached check
+        const distToGoal = Math.hypot(ball.x - endPoint.x, ball.y - endPoint.y);
+        if (distToGoal < pathWidth / 3) {
+          completeGame();
+        }
+      } else {
+        // Player slipped off track
+        isDragging = false;
+        playTone(180, 'sawtooth', 0.2);
+        resetBall();
+      }
+    }
+
+    function handlePointerUp() {
+      isDragging = false;
+    }
+
+    function startGame() {
+      if (!audioCtx) {
+        audioCtx = new AudioCtx();
+      }
+      isPlaying = true;
+      resetBall();
+      startTime = Date.now();
+      timerInterval = setInterval(() => {
+        elapsedTime = ((Date.now() - startTime) / 1000).toFixed(1);
+        timerEl.textContent = `Time: ${elapsedTime}s`;
+      }, 100);
+
+      startModal.style.display = 'none';
+      winModal.style.display = 'none';
+    }
+
+    function completeGame() {
+      isPlaying = false;
+      isDragging = false;
+      clearInterval(timerInterval);
+      playTone(523.25, 'sine', 0.15); // C5
+      setTimeout(() => playTone(659.25, 'sine', 0.2), 150); // E5
+
+      finalTimeEl.textContent = `Course time: ${elapsedTime} seconds`;
+      winModal.style.display = 'flex';
+    }
+
+    // Event Listeners
+    window.addEventListener('resize', resizeCanvas);
+    canvas.addEventListener('pointerdown', handlePointerDown);
+    canvas.addEventListener('pointermove', handlePointerMove);
+    canvas.addEventListener('pointerup', handlePointerUp);
+
+    document.getElementById('start-btn').addEventListener('click', startGame);
+    document.getElementById('restart-btn').addEventListener('click', startGame);
+
+    // Initialization
+    resizeCanvas();
+    render();
+  </script>
+</body>
+</html>
